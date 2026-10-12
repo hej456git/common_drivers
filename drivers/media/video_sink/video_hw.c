@@ -6393,17 +6393,25 @@ s32 config_vd_blend(struct video_layer_s *layer,
 			cur_frame_par->VPP_hd_end_lines_;
 	}
 
-	if ((cur_frame_par->VPP_post_blend_vd_v_end_ -
-	     cur_frame_par->VPP_post_blend_vd_v_start_ + 1)
-	    > VPP_PREBLEND_VD_V_END_LIMIT) {
-		setting->preblend_v_start =
-			cur_frame_par->VPP_post_blend_vd_v_start_;
-		setting->preblend_v_end =
-			cur_frame_par->VPP_post_blend_vd_v_end_;
-	} else {
-		setting->preblend_v_start = 0;
-		setting->preblend_v_end =
-			VPP_PREBLEND_VD_V_END_LIMIT - 1;
+	/*
+	 * MVC vertical shift: preserve the MVC-specific preblend
+	 * window above for non-zero vertical offsets. The generic
+	 * preblend assignment would otherwise overwrite it.
+	 */
+	if (!(dispbuf && (dispbuf->type & VIDTYPE_MVC) &&
+	      glayer_info[0].layer_top != 0)) {
+	        if ((cur_frame_par->VPP_post_blend_vd_v_end_ -
+	             cur_frame_par->VPP_post_blend_vd_v_start_ + 1)
+	            > VPP_PREBLEND_VD_V_END_LIMIT) {
+			setting->preblend_v_start =
+				cur_frame_par->VPP_post_blend_vd_v_start_;
+			setting->preblend_v_end =
+				cur_frame_par->VPP_post_blend_vd_v_end_;
+	        } else {
+			setting->preblend_v_start = 0;
+			setting->preblend_v_end =
+				VPP_PREBLEND_VD_V_END_LIMIT - 1;
+	        }
 	}
 
 	setting->preblend_h_size =
