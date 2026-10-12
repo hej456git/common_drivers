@@ -5392,19 +5392,42 @@ static void get_3d_vert_pos(struct video_layer_s *layer,
 	if ((process_3d_type & MODE_3D_FP) &&
 	    !(vf->type & VIDTYPE_MVC)) {
 		u32 visible_height = vf->height;
+		u32 eye_height;
+		u32 usable_height;
+		u32 shift_top = 0;
+		u32 shift_bottom = 0;
+		s32 shift = glayer_info[0].layer_top;
+
+		eye_height = (vpp_3d_mode == VPP_3D_MODE_TB) ?
+		        (visible_height >> 1) : visible_height;
+		usable_height = (eye_height > crop_sy + crop_ey) ?
+		        eye_height - crop_sy - crop_ey : 0;
+
+		if (usable_height > 1) {
+		        if (shift > (s32)(usable_height - 1))
+		                shift = usable_height - 1;
+		        else if (shift < -(s32)(usable_height - 1))
+		                shift = -(s32)(usable_height - 1);
+		} else {
+		        shift = 0;
+		}
+
+		if (shift > 0)
+		        shift_bottom = shift;
+		else if (shift < 0)
+		        shift_top = -shift;
 
 		if (vpp_3d_mode == VPP_3D_MODE_LR) {
-			*ls = crop_sy;
-			*le = visible_height - crop_ey - 1;
+			*ls = crop_sy + shift_top;
+			*le = visible_height - crop_ey - shift_bottom - 1;
 			*rs = *ls;
 			*re = *le;
 		} else if (vpp_3d_mode == VPP_3D_MODE_TB) {
-			u32 eye_height = visible_height >> 1;
 
-			*ls = crop_sy;
-			*le = eye_height - crop_ey - 1;
-			*rs = eye_height + crop_sy;
-			*re = visible_height - crop_ey - 1;
+			*ls = crop_sy + shift_top;
+			*le = eye_height - crop_ey - shift_bottom - 1;
+			*rs = eye_height + crop_sy + shift_top;
+			*re = visible_height - crop_ey - shift_bottom - 1;
 		} else {
 			*ls = *rs = layer->start_y_lines;
 			*le = *re = layer->end_y_lines;
@@ -5658,6 +5681,25 @@ s32 config_3d_vd2_blend(struct video_layer_s *layer,
 			(((cur_frame_par->VPP_vsc_endp -
 			   cur_frame_par->VPP_vsc_startp + 1 - blank) >> 1) + blank);
 		setting->postblend_v_end = cur_frame_par->VPP_vsc_endp;
+
+		{
+		        s32 shift = glayer_info[0].layer_top;
+		        s32 max_shift =
+		                ((cur_frame_par->VPP_vsc_endp -
+		                  cur_frame_par->VPP_vsc_startp + 1 -
+		                  blank) >> 1) - 1;
+
+		        if (shift > max_shift)
+		                shift = max_shift;
+		        else if (shift < -max_shift)
+		                shift = -max_shift;
+
+		        if (shift > 0)
+		                setting->postblend_v_start += shift;
+		        else if (shift < 0)
+		                setting->postblend_v_end =
+		                        (s32)setting->postblend_v_end + shift;
+		}
 		setting->postblend_h_start = cur_frame_par->VPP_hsc_startp;
 		setting->postblend_h_end = cur_frame_par->VPP_hsc_endp;
 	} else if (dispbuf && (dispbuf->type & VIDTYPE_MVC)) {
@@ -6405,6 +6447,39 @@ s32 config_vd_blend(struct video_layer_s *layer,
 			setting->postblend_v_end =
 				cur_frame_par->VPP_vsc_endp;
 		}
+	}
+
+	if ((process_3d_type & MODE_3D_FP) &&
+	    dispbuf && !(dispbuf->type & VIDTYPE_MVC) &&
+	    layer->layer_id == 0 &&
+	    glayer_info[0].layer_top != 0) {
+	        u32 blank = framepacking_support ? framepacking_blank : 0;
+	        s32 shift = glayer_info[0].layer_top;
+	        s32 eye_height =
+	                (cur_frame_par->VPP_vsc_endp -
+	                 cur_frame_par->VPP_vsc_startp + 1 -
+	                 blank) >> 1;
+	        s32 max_shift = eye_height - 1;
+	        s32 eye_start = cur_frame_par->VPP_vsc_startp;
+	        s32 eye_end = eye_start + eye_height - 1;
+
+	        if (shift > max_shift)
+	                shift = max_shift;
+	        else if (shift < -max_shift)
+	                shift = -max_shift;
+
+	        /*
+	         * FULL3D vertical shift: keep VD1 postblend as the
+	         * fixed 2205-line FP container. Shift/clip only
+	         * the upper-eye preblend window.
+	         */
+	        if (shift > 0) {
+	                setting->preblend_v_start = eye_start + shift;
+	                setting->preblend_v_end = eye_end;
+	        } else {
+	                setting->preblend_v_start = eye_start;
+	                setting->preblend_v_end = eye_end + shift;
+	        }
 	}
 
 	if (!legacy_vpp) {
