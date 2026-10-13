@@ -6430,6 +6430,29 @@ s32 config_vd_blend(struct video_layer_s *layer,
 			VPP_PREBLEND_VD_V_END_LIMIT - 1;
 	}
 
+	/*
+	 * MVC vertical shift: start from the normal VD1 preblend
+	 * window, then apply the requested shift exactly once.
+	 */
+	if (dispbuf && (dispbuf->type & VIDTYPE_MVC) &&
+	    glayer_info[0].layer_top != 0) {
+		s32 shift = glayer_info[0].layer_top;
+		s32 height = setting->preblend_v_end -
+			setting->preblend_v_start + 1;
+		s32 max_shift = height - 1;
+
+		if (shift > max_shift)
+			shift = max_shift;
+		else if (shift < -max_shift)
+			shift = -max_shift;
+
+		if (shift > 0)
+			setting->preblend_v_start += shift;
+		else if (shift < 0)
+			setting->preblend_v_end =
+				(s32)setting->preblend_v_end + shift;
+	}
+
 	setting->preblend_h_size =
 		cur_frame_par->video_input_w;
 	setting->postblend_h_size =
