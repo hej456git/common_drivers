@@ -5644,8 +5644,6 @@ s32 config_3d_vd2_blend(struct video_layer_s *layer,
 	} else if ((process_3d_type & MODE_3D_FP) &&
 		   dispbuf && !(dispbuf->type & VIDTYPE_MVC)) {
 		u32 blank;
-		u32 eye_height;
-		s32 vshift;
 
 		/* FULL3D_FP_V030RC1: synthetic packed sources keep VPP_vd_* at the
 		 * 2160-line virtual source canvas, while VPP_vsc_* describes
@@ -5655,61 +5653,26 @@ s32 config_3d_vd2_blend(struct video_layer_s *layer,
 			blank = framepacking_blank;
 		else
 			blank = 0;
-		eye_height = (glayer_info[0].layer_height - blank) >> 1;
-		vshift = glayer_info[0].layer_top;
-
-		if (vshift > (s32)eye_height - 1)
-			vshift = (s32)eye_height - 1;
-		else if (vshift < -((s32)eye_height - 1))
-			vshift = -((s32)eye_height - 1);
-
-		/*
-		 * The generic VPP path clips the complete 2205-line window
-		 * before VD2 is positioned.  Do not derive the right-eye
-		 * shift from that shortened window: apply the original
-		 * video-axis Y offset equally within the right-eye slot.
-		 */
-		setting->postblend_v_start = eye_height + blank;
-		setting->postblend_v_end =
-			eye_height + blank + eye_height - 1;
-
-		if (vshift > 0)
-			setting->postblend_v_start += vshift;
-		else if (vshift < 0)
-			setting->postblend_v_end += vshift;
+		setting->postblend_v_start =
+			cur_frame_par->VPP_vsc_startp +
+			(((cur_frame_par->VPP_vsc_endp -
+			   cur_frame_par->VPP_vsc_startp + 1 - blank) >> 1) + blank);
+		setting->postblend_v_end = cur_frame_par->VPP_vsc_endp;
 		setting->postblend_h_start = cur_frame_par->VPP_hsc_startp;
 		setting->postblend_h_end = cur_frame_par->VPP_hsc_endp;
 	} else if (dispbuf && (dispbuf->type & VIDTYPE_MVC)) {
 		u32 blank;
-		u32 eye_height;
-		s32 vshift;
 
 		if (framepacking_support)
 			blank = framepacking_blank;
 		else
 			blank = 0;
-		eye_height = (glayer_info[0].layer_height - blank) >> 1;
-		vshift = glayer_info[0].layer_top;
-
-		if (vshift > (s32)eye_height - 1)
-			vshift = (s32)eye_height - 1;
-		else if (vshift < -((s32)eye_height - 1))
-			vshift = -((s32)eye_height - 1);
-
-		/*
-		 * The generic VPP path clips the complete 2205-line window
-		 * before VD2 is positioned.  Do not derive the right-eye
-		 * shift from that shortened window: apply the original
-		 * video-axis Y offset equally within the right-eye slot.
-		 */
-		setting->postblend_v_start = eye_height + blank;
+		setting->postblend_v_start =
+			(cur_frame_par->VPP_vd_end_lines_
+			- blank + 1) >> 1;
+		setting->postblend_v_start += blank;
 		setting->postblend_v_end =
-			eye_height + blank + eye_height - 1;
-
-		if (vshift > 0)
-			setting->postblend_v_start += vshift;
-		else if (vshift < 0)
-			setting->postblend_v_end += vshift;
+			cur_frame_par->VPP_vd_end_lines_;
 		setting->postblend_h_start =
 			cur_frame_par->VPP_hd_start_lines_;
 		setting->postblend_h_end =
