@@ -5462,6 +5462,17 @@ RERTY:
 
 	process_3d_type = local_input.proc_3d_type;
 	wide_mode = local_input.wide_mode;
+
+	/*
+	 * FULL3D vertical shift: keep the HDMI frame-packed output
+	 * container fixed. input->layer_top remains the requested
+	 * per-eye vertical shift for the synthetic FP path.
+	 */
+	if ((process_3d_type & MODE_3D_FP) &&
+	    local_input.layer_id == 0) {
+	        local_input.layer_top = 0;
+	        local_input.layer_height = vinfo->height;
+	}
 	if (vf->dec_set_screen_mode == VIDEO_OPTION_NORMAL)
 		wide_mode = VIDEO_WIDEOPTION_NORMAL;
 
