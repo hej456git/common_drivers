@@ -5715,6 +5715,30 @@ s32 config_3d_vd2_blend(struct video_layer_s *layer,
 		setting->postblend_v_start += blank;
 		setting->postblend_v_end =
 			cur_frame_par->VPP_vd_end_lines_;
+
+		/*
+		 * MVC vertical shift: move/clip VD2 by the same amount
+		 * as the VD1 eye while keeping the FP container fixed.
+		 */
+		{
+			s32 shift = glayer_info[0].layer_top;
+			s32 eye_height =
+				(cur_frame_par->VPP_vd_end_lines_ -
+				 blank + 1) >> 1;
+			s32 max_shift = eye_height - 1;
+
+			if (shift > max_shift)
+				shift = max_shift;
+			else if (shift < -max_shift)
+				shift = -max_shift;
+
+			if (shift > 0)
+				setting->postblend_v_start += shift;
+			else if (shift < 0)
+				setting->postblend_v_end =
+					(s32)setting->postblend_v_end + shift;
+		}
+
 		setting->postblend_h_start =
 			cur_frame_par->VPP_hd_start_lines_;
 		setting->postblend_h_end =
