@@ -5593,9 +5593,6 @@ void config_3d_vd2_position(struct video_layer_s *layer,
 		setting->r_vs_chrm = 0;
 		setting->r_ve_chrm = 0;
 	} else if ((dispbuf->type & VIDTYPE_MVC) && framepacking_support) {
-		s32 shift = glayer_info[0].layer_top;
-		s32 max_shift;
-
 		setting->l_vs_chrm =
 			setting->r_vs_chrm;
 		setting->l_ve_chrm =
@@ -5604,29 +5601,6 @@ void config_3d_vd2_position(struct video_layer_s *layer,
 			setting->r_vs_luma;
 		setting->l_ve_luma =
 			setting->r_ve_luma;
-
-		/*
-		 * MVC vertical shift: crop the VD2 source eye in the
-		 * same direction as the VD1 preblend/source window.
-		 * Destination movement is handled in config_3d_vd2_blend().
-		 */
-		max_shift = setting->l_ve_luma -
-			setting->l_vs_luma;
-
-		if (shift > max_shift)
-			shift = max_shift;
-		else if (shift < -max_shift)
-			shift = -max_shift;
-
-		if (shift > 0) {
-			setting->l_ve_luma -= shift;
-			setting->l_ve_chrm -= shift >> 1;
-		} else if (shift < 0) {
-			shift = -shift;
-			setting->l_vs_luma += shift;
-			setting->l_vs_chrm += shift >> 1;
-		}
-
 		setting->r_vs_luma = 0;
 		setting->r_ve_luma = 0;
 		setting->r_vs_chrm = 0;
