@@ -5720,6 +5720,23 @@ s32 config_3d_vd2_blend(struct video_layer_s *layer,
 		setting->postblend_h_end =
 			cur_frame_par->VPP_hd_end_lines_;
 	}
+	if (dispbuf && (dispbuf->type & VIDTYPE_MVC)) {
+		static s32 last_mvc_shift_vd2 = 0x7fffffff;
+		s32 shift = glayer_info[0].layer_top;
+
+		if (shift != last_mvc_shift_vd2) {
+			pr_info("MVC3D_POS VD2 shift=%d vd=%u..%u vsc=%u..%u post=%u..%u\n",
+				shift,
+				cur_frame_par->VPP_vd_start_lines_,
+				cur_frame_par->VPP_vd_end_lines_,
+				cur_frame_par->VPP_vsc_startp,
+				cur_frame_par->VPP_vsc_endp,
+				setting->postblend_v_start,
+				setting->postblend_v_end);
+			last_mvc_shift_vd2 = shift;
+		}
+	}
+
 	return 0;
 }
 
@@ -6454,6 +6471,25 @@ s32 config_vd_blend(struct video_layer_s *layer,
 				cur_frame_par->VPP_vsc_startp;
 			setting->postblend_v_end =
 				cur_frame_par->VPP_vsc_endp;
+		}
+	}
+
+	if (dispbuf && (dispbuf->type & VIDTYPE_MVC)) {
+		static s32 last_mvc_shift_vd1 = 0x7fffffff;
+		s32 shift = glayer_info[0].layer_top;
+
+		if (shift != last_mvc_shift_vd1) {
+			pr_info("MVC3D_POS VD1 shift=%d vd=%u..%u vsc=%u..%u pre=%u..%u post=%u..%u\n",
+				shift,
+				cur_frame_par->VPP_vd_start_lines_,
+				cur_frame_par->VPP_vd_end_lines_,
+				cur_frame_par->VPP_vsc_startp,
+				cur_frame_par->VPP_vsc_endp,
+				setting->preblend_v_start,
+				setting->preblend_v_end,
+				setting->postblend_v_start,
+				setting->postblend_v_end);
+			last_mvc_shift_vd1 = shift;
 		}
 	}
 
