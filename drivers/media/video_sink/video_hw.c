@@ -5739,6 +5739,28 @@ s32 config_3d_vd2_blend(struct video_layer_s *layer,
 					(s32)setting->postblend_v_end + shift;
 		}
 
+		{
+			static s32 last_shift = 0x7fffffff;
+			static u32 last_post_s, last_post_e;
+
+			s32 shift = glayer_info[0].layer_top;
+
+			if (shift != last_shift ||
+			    setting->postblend_v_start != last_post_s ||
+			    setting->postblend_v_end != last_post_e) {
+				pr_info("MVC3D_POS VD2 shift=%d post=%u..%u src=%u..%u\n",
+					shift,
+					setting->postblend_v_start,
+					setting->postblend_v_end,
+					layer->mif_setting.r_vs_luma,
+					layer->mif_setting.r_ve_luma);
+
+				last_shift = shift;
+				last_post_s = setting->postblend_v_start;
+				last_post_e = setting->postblend_v_end;
+			}
+		}
+
 		setting->postblend_h_start =
 			cur_frame_par->VPP_hd_start_lines_;
 		setting->postblend_h_end =
@@ -6436,6 +6458,37 @@ s32 config_vd_blend(struct video_layer_s *layer,
 			setting->preblend_v_end =
 				VPP_PREBLEND_VD_V_END_LIMIT - 1;
 	        }
+	}
+
+	if (dispbuf && (dispbuf->type & VIDTYPE_MVC)) {
+		static s32 last_shift = 0x7fffffff;
+		static u32 last_pre_s, last_pre_e;
+		static u32 last_post_s, last_post_e;
+
+		s32 shift = glayer_info[0].layer_top;
+
+		if (shift != last_shift ||
+		    setting->preblend_v_start != last_pre_s ||
+		    setting->preblend_v_end != last_pre_e ||
+		    setting->postblend_v_start != last_post_s ||
+		    setting->postblend_v_end != last_post_e) {
+			pr_info("MVC3D_POS VD1 shift=%d vd=%u..%u vsc=%u..%u pre=%u..%u post=%u..%u\n",
+				shift,
+				cur_frame_par->VPP_vd_start_lines_,
+				cur_frame_par->VPP_vd_end_lines_,
+				cur_frame_par->VPP_vsc_startp,
+				cur_frame_par->VPP_vsc_endp,
+				setting->preblend_v_start,
+				setting->preblend_v_end,
+				setting->postblend_v_start,
+				setting->postblend_v_end);
+
+			last_shift = shift;
+			last_pre_s = setting->preblend_v_start;
+			last_pre_e = setting->preblend_v_end;
+			last_post_s = setting->postblend_v_start;
+			last_post_e = setting->postblend_v_end;
+		}
 	}
 
 	setting->preblend_h_size =
