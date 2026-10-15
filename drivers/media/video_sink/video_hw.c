@@ -5709,12 +5709,27 @@ s32 config_3d_vd2_blend(struct video_layer_s *layer,
 			blank = framepacking_blank;
 		else
 			blank = 0;
-		setting->postblend_v_start =
-			(cur_frame_par->VPP_vd_end_lines_
-			- blank + 1) >> 1;
-		setting->postblend_v_start += blank;
-		setting->postblend_v_end =
-			cur_frame_par->VPP_vd_end_lines_;
+		/* MVC-only test: shift the second-eye blend window. */
+		{
+			s32 shift = glayer_info[0].layer_top;
+			s32 blank_lines = blank;
+			s32 output_end = cur_frame_par->VPP_vsc_endp;
+			s32 container_end;
+			s32 eye_height;
+			s32 eye_start;
+
+			/* Recover the unshifted output container. */
+			container_end = output_end +
+				(shift < 0 ? -shift : 0);
+			eye_height = (container_end + 1 -
+				blank_lines) >> 1;
+			eye_start = eye_height + blank_lines;
+
+			setting->postblend_v_start =
+				eye_start + (shift > 0 ? shift : 0);
+			setting->postblend_v_end =
+				container_end + (shift < 0 ? shift : 0);
+		}
 		setting->postblend_h_start =
 			cur_frame_par->VPP_hd_start_lines_;
 		setting->postblend_h_end =
