@@ -5704,22 +5704,47 @@ s32 config_3d_vd2_blend(struct video_layer_s *layer,
 		setting->postblend_h_end = cur_frame_par->VPP_hsc_endp;
 	} else if (dispbuf && (dispbuf->type & VIDTYPE_MVC)) {
 		u32 blank;
+		s32 shift = glayer_info[0].layer_top;
+		s32 eye_height;
+		s32 eye_start;
+		s32 eye_end;
+		s32 max_shift;
 
 		if (framepacking_support)
 			blank = framepacking_blank;
 		else
 			blank = 0;
+
+		/*
+		 * MVC output container is fixed. Place/crop VD2 relative
+		 * to the fixed lower-eye frame-packed destination.
+		 */
+		eye_height =
+			(cur_frame_par->VPP_vsc_endp -
+			 cur_frame_par->VPP_vsc_startp + 1 -
+			 blank) >> 1;
+		eye_start =
+			cur_frame_par->VPP_vsc_startp +
+			eye_height + blank;
+		eye_end = cur_frame_par->VPP_vsc_endp;
+		max_shift = eye_height - 1;
+
+		if (shift > max_shift)
+			shift = max_shift;
+		else if (shift < -max_shift)
+			shift = -max_shift;
+
 		setting->postblend_v_start =
-			(cur_frame_par->VPP_vd_end_lines_
-			- blank + 1) >> 1;
-		setting->postblend_v_start += blank;
+			eye_start + (shift > 0 ? shift : 0);
 		setting->postblend_v_end =
-			cur_frame_par->VPP_vd_end_lines_;
+			eye_end + (shift < 0 ? shift : 0);
+
 		setting->postblend_h_start =
 			cur_frame_par->VPP_hd_start_lines_;
 		setting->postblend_h_end =
 			cur_frame_par->VPP_hd_end_lines_;
 	}
+
 	return 0;
 }
 
@@ -6056,6 +6081,41 @@ s32 config_vd_position_internal(struct video_layer_s *layer,
 			&setting->r_vs_luma, &setting->r_ve_luma);
 	}
 #endif
+
+	/*
+	 * MVC frame-packed vertical shift:
+	 * crop both source eyes identically. Destination placement
+	 * is handled separately by VD1 and VD2 blend windows.
+	 */
+	if (setting->id == 0 &&
+	    (dispbuf->type & VIDTYPE_MVC) &&
+	    framepacking_support &&
+	    !is_enable_3d_to_2d() &&
+	    glayer_info[0].layer_top != 0) {
+		s32 shift = glayer_info[0].layer_top;
+		s32 left_height =
+			setting->l_ve_luma - setting->l_vs_luma + 1;
+		s32 right_height =
+			setting->r_ve_luma - setting->r_vs_luma + 1;
+		s32 max_shift =
+			(left_height < right_height ? left_height : right_height) - 1;
+
+		if (shift > max_shift)
+			shift = max_shift;
+		else if (shift < -max_shift)
+			shift = -max_shift;
+
+		if (shift > 0) {
+			setting->l_ve_luma -= shift;
+			setting->r_ve_luma -= shift;
+		} else if (shift < 0) {
+			s32 crop = -shift;
+
+			setting->l_vs_luma += crop;
+			setting->r_vs_luma += crop;
+		}
+	}
+
 	setting->l_hs_chrm = setting->l_hs_luma >> 1;
 	setting->l_he_chrm = setting->l_he_luma >> 1;
 	setting->r_hs_chrm = setting->r_hs_luma >> 1;
@@ -6455,6 +6515,36 @@ s32 config_vd_blend(struct video_layer_s *layer,
 			setting->postblend_v_end =
 				cur_frame_par->VPP_vsc_endp;
 		}
+	}
+
+	/*
+	 * MVC frame-packed upper-eye placement.
+	 * Keep the 2205-line output container fixed and clip/place
+	 * VD1 by exactly the same shift used for VD2.
+	 */
+	if (dispbuf && (dispbuf->type & VIDTYPE_MVC) &&
+	    framepacking_support &&
+	    !is_enable_3d_to_2d() &&
+	    glayer_info[0].layer_top != 0) {
+		u32 blank = framepacking_blank;
+		s32 shift = glayer_info[0].layer_top;
+		s32 eye_height =
+			(cur_frame_par->VPP_vsc_endp -
+			 cur_frame_par->VPP_vsc_startp + 1 -
+			 blank) >> 1;
+		s32 eye_start = cur_frame_par->VPP_vsc_startp;
+		s32 eye_end = eye_start + eye_height - 1;
+		s32 max_shift = eye_height - 1;
+
+		if (shift > max_shift)
+			shift = max_shift;
+		else if (shift < -max_shift)
+			shift = -max_shift;
+
+		setting->preblend_v_start =
+			eye_start + (shift > 0 ? shift : 0);
+		setting->preblend_v_end =
+			eye_end + (shift < 0 ? shift : 0);
 	}
 
 	if ((process_3d_type & MODE_3D_FP) &&

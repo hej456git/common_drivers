@@ -5468,10 +5468,15 @@ RERTY:
 	 * container fixed. input->layer_top remains the requested
 	 * per-eye vertical shift for the synthetic FP path.
 	 */
-	if ((process_3d_type & MODE_3D_FP) &&
+	if (((process_3d_type & MODE_3D_FP) ||
+	     (process_3d_type & MODE_3D_MVC)) &&
 	    local_input.layer_id == 0) {
-	        local_input.layer_top = 0;
-	        local_input.layer_height = vinfo->height;
+		/*
+		 * Frame-packed 3D vertical shift is applied per eye below.
+		 * Keep the HDMI output container itself fixed.
+		 */
+		local_input.layer_top = 0;
+		local_input.layer_height = vinfo->height;
 	}
 	if (vf->dec_set_screen_mode == VIDEO_OPTION_NORMAL)
 		wide_mode = VIDEO_WIDEOPTION_NORMAL;
