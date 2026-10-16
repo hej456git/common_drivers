@@ -5469,7 +5469,8 @@ RERTY:
 	 * per-eye vertical shift for the synthetic FP path.
 	 */
 	if (((process_3d_type & MODE_3D_FP) ||
-	     (process_3d_type & MODE_3D_MVC)) &&
+	     ((process_3d_type & MODE_3D_MVC) &&
+	      local_input.layer_top != 0)) &&
 	    local_input.layer_id == 0) {
 		/*
 		 * Frame-packed 3D vertical shift is applied per eye below.

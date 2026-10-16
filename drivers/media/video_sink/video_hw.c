@@ -5734,10 +5734,19 @@ s32 config_3d_vd2_blend(struct video_layer_s *layer,
 		else if (shift < -max_shift)
 			shift = -max_shift;
 
-		setting->postblend_v_start =
-			eye_start + (shift > 0 ? shift : 0);
-		setting->postblend_v_end =
-			eye_end + (shift < 0 ? shift : 0);
+		if (shift == 0) {
+			setting->postblend_v_start =
+				(cur_frame_par->VPP_vd_end_lines_
+				 - blank + 1) >> 1;
+			setting->postblend_v_start += blank;
+			setting->postblend_v_end =
+				cur_frame_par->VPP_vd_end_lines_;
+		} else {
+			setting->postblend_v_start =
+				eye_start + (shift > 0 ? shift : 0);
+			setting->postblend_v_end =
+				eye_end + (shift < 0 ? shift : 0);
+		}
 
 		setting->postblend_h_start =
 			cur_frame_par->VPP_hd_start_lines_;
