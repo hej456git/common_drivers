@@ -105,6 +105,7 @@
 #include <linux/amlogic/media/frc/frc_common.h>
 #endif
 
+
 struct video_layer_s vd_layer[MAX_VD_LAYER];
 struct disp_info_s glayer_info[MAX_VD_LAYER];
 struct vpu_venc_regs_s venc_regs[VPP_NUM];
@@ -883,6 +884,52 @@ static u32 cur_vpp_num = MAX_VPP_NUM;
 static unsigned int cur_vf_flag[MAX_VPP_NUM];
 static u32 vpp_ofifo_size = 0x1000;
 static u32 conv_lbuf_len[MAX_VD_LAYER] = {0x100, 0x100, 0x100};
+
+/* FULL3D_LINEAR: enabled by default; S7D synthetic uncompressed VD2 MIF only. */
+static bool full3d_vd2_linear = true;
+
+/* Automatic Amlogic synthetic Full3D corrections.
+ * Enabled by default; disable for troubleshooting. */
+static bool full3d_auto_fp = true;
+
+
+/*
+ * Conventional Amlogic VD2 preblend register path.
+ * S5/C3 use separate display implementations and are excluded
+ * until their geometry has been independently validated.
+ */
+static bool full3d_vd2_preblend_supported(void)
+{
+	if (!cur_dev)
+		return false;
+
+	if (cur_dev->display_module == S5_DISPLAY_MODULE ||
+	    cur_dev->display_module == C3_DISPLAY_MODULE)
+		return false;
+
+	return vd_layer[1].vpp_blend_reg.postblend_h_start_end ==
+		VPP_BLEND_VD2_H_START_END;
+}
+
+
+
+/*
+ * Full3D: shared-SAFA synthetic Full3D eligibility.
+ * Preserve verified S7D behavior; admit S6 only when its
+ * VD1/VD2 pipeline matches the required configuration.
+ */
+static bool full3d_shared_safa_fp_soc(void)
+{
+    if (video_is_meson_s7d_cpu())
+        return true;
+
+    return video_is_meson_s6_cpu() &&
+        cur_dev &&
+        cur_dev->vd1_vsr_safa_support &&
+        !cur_dev->vd2_independ_blend_ctrl &&
+        cur_dev->mif_linear &&
+        full3d_vd2_preblend_supported();
+}
 
 static const enum f2v_vphase_type_e vpp_phase_table[4][3] = {
 	{F2V_P2IT, F2V_P2IB, F2V_P2P},	/* VIDTYPE_PROGRESSIVE */
@@ -2577,7 +2624,7 @@ static void vd1_set_dcu(struct video_layer_s *layer,
 		cur_dev->rdma_func[vpp_index].rdma_wr_bits
 			(vd_mif_reg->vd_if0_gen_reg2, 0, 0, 2);
 	if (is_mvc) {
-		/* FULL3D_FP_V030RC1: restore VD2 pixel-format bits after synthetic packed playback. */
+		/* FULL3D_FP: restore VD2 pixel-format bits after synthetic packed playback. */
 		if (type & VIDTYPE_VIU_NV21)
 			cur_dev->rdma_func[vpp_index].rdma_wr_bits
 				(vd2_mif_reg->vd_if0_gen_reg2, 1, 0, 2);
@@ -4281,13 +4328,19 @@ static void vd1_scaler_setting(struct video_layer_s *layer, struct scaler_settin
 	/*vpp input size setting*/
 	{
 		u32 full3d_vpp_h = frame_par->video_input_h;
+		bool is_linear_mif = cur_dev->mif_linear ||
+				     (cur_dev->display_module == T7_DISPLAY_MODULE);
 
-		if ((process_3d_type & MODE_3D_FP) && framepacking_support &&
+		/* Non-linear-MIF pipelines retain the calculated FP input span.
+		 * Linear-MIF and T7 retain the original video_input_h. */
+		if (!is_linear_mif &&
+		    (process_3d_type & MODE_3D_FP) && framepacking_support &&
 		    layer->dispbuf && !(layer->dispbuf->type & VIDTYPE_MVC)) {
-			/* FULL3D_FP_V030RC1: logical FP canvas = 1080 + blank + 1080. */
+			/* FULL3D_FP: logical FP canvas = 1080 + blank + 1080. */
 			full3d_vpp_h = frame_par->VPP_vsc_endp -
 				frame_par->VPP_vsc_startp + 1;
 		}
+
 		cur_dev->rdma_func[vpp_index].rdma_wr
 			(VPP_IN_H_V_SIZE + misc_off,
 			((frame_par->video_input_w & 0x1fff) << 16)
@@ -4502,6 +4555,10 @@ static void vdx_scaler_setting(struct video_layer_s *layer, struct scaler_settin
 		r3 = frame_par->VPP_hsc_endp
 			- frame_par->VPP_hsc_startp;
 
+
+
+
+
 		cur_dev->rdma_func[vpp_index].rdma_wr_bits
 			(vd_pps_reg->vd_hsc_phase_ctrl,
 			frame_par->VPP_hf_ini_phase_,
@@ -4709,9 +4766,16 @@ static void vdx_scaler_setting(struct video_layer_s *layer, struct scaler_settin
 		cur_dev->rdma_func[vpp_index].rdma_wr
 			(vd_pps_reg->vd_hsc_region4_endp, r3);
 
-		cur_dev->rdma_func[vpp_index].rdma_wr
-			(vd_pps_reg->vd_hsc_start_phase_step,
-			vpp_filter->vpp_hf_start_phase_step);
+
+		{
+			u32 vd2_hstep = vpp_filter->vpp_hf_start_phase_step;
+
+
+
+			cur_dev->rdma_func[vpp_index].rdma_wr
+				(vd_pps_reg->vd_hsc_start_phase_step,
+				vd2_hstep);
+		}
 
 		cur_dev->rdma_func[vpp_index].rdma_wr
 			(vd_pps_reg->vd_hsc_region1_phase_slope,
@@ -5388,7 +5452,7 @@ static void get_3d_vert_pos(struct video_layer_s *layer,
 	else
 		height = frame_height;
 
-	/* FULL3D_FP_V030RC1: synthetic FP reads eye coordinates from the decoded SBS/TB source. */
+	/* FULL3D_FP: synthetic FP reads eye coordinates from the decoded SBS/TB source. */
 	if ((process_3d_type & MODE_3D_FP) &&
 	    !(vf->type & VIDTYPE_MVC)) {
 		u32 visible_height = vf->height;
@@ -5397,6 +5461,25 @@ static void get_3d_vert_pos(struct video_layer_s *layer,
 		u32 shift_top = 0;
 		u32 shift_bottom = 0;
 		s32 shift = glayer_info[0].layer_top;
+
+		/* Preserve complete decoded eyes when the positive inset
+		 * represents placement rather than an explicit crop.
+		 *
+		 * The wide-aspect fallback retains the verified wide
+		 * correction; otherwise require zero explicit Y crop.
+		 */
+		if (full3d_auto_fp &&
+		    full3d_vd2_preblend_supported() &&
+		    (process_3d_type & (MODE_3D_ENABLE | MODE_3D_FP)) ==
+		    (MODE_3D_ENABLE | MODE_3D_FP) &&
+		    framepacking_support &&
+		    vpp_3d_mode == VPP_3D_MODE_LR &&
+		    !(vf->type & (VIDTYPE_MVC | VIDTYPE_COMPRESS)) &&
+		    shift > 0 &&
+		    ((u64)vf->width > (u64)vf->height * 4 ||
+		     (crop_sy == 0 && crop_ey == 0))) {
+			shift = 0;
+		}
 
 		eye_height = (vpp_3d_mode == VPP_3D_MODE_TB) ?
 		        (visible_height >> 1) : visible_height;
@@ -5572,7 +5655,7 @@ void config_3d_vd2_position(struct video_layer_s *layer,
 	/* not framepacking mode, need process vert position more */
 	/* framepacking mode, need use right eye position */
 	/* to set vd2 Y0 not vd1 Y1*/
-	/* FULL3D_FP_V030RC1: feed synthetic VD2 from the calculated right-eye MIF rectangle.
+	/* FULL3D_FP: feed synthetic VD2 from the calculated right-eye MIF rectangle.
 	 * The proven Full3D path is ordinary uncompressed MIF. */
 	if ((process_3d_type & MODE_3D_FP) &&
 	    !(dispbuf->type & VIDTYPE_MVC)) {
@@ -5607,6 +5690,7 @@ void config_3d_vd2_position(struct video_layer_s *layer,
 		setting->r_ve_chrm = 0;
 	}
 	setting->vpp_3d_mode = 0;
+
 }
 
 s32 config_3d_vd2_pps(struct video_layer_s *layer,
@@ -5620,6 +5704,10 @@ s32 config_3d_vd2_pps(struct video_layer_s *layer,
 	setting->support = glayer_info[1].pps_support;
 	setting->sc_top_enable = false;
 	setting->id = 1;
+
+
+
+
 	return 0;
 }
 
@@ -5668,7 +5756,7 @@ s32 config_3d_vd2_blend(struct video_layer_s *layer,
 		   dispbuf && !(dispbuf->type & VIDTYPE_MVC)) {
 		u32 blank;
 
-		/* FULL3D_FP_V030RC1: synthetic packed sources keep VPP_vd_* at the
+		/* FULL3D_FP: synthetic packed sources keep VPP_vd_* at the
 		 * 2160-line virtual source canvas, while VPP_vsc_* describes
 		 * the actual 2205-line frame-packed output window.  Place VD2
 		 * from the OUTPUT window, matching real MVC exactly. */
@@ -5676,11 +5764,34 @@ s32 config_3d_vd2_blend(struct video_layer_s *layer,
 			blank = framepacking_blank;
 		else
 			blank = 0;
-		setting->postblend_v_start =
-			cur_frame_par->VPP_vsc_startp +
-			(((cur_frame_par->VPP_vsc_endp -
-			   cur_frame_par->VPP_vsc_startp + 1 - blank) >> 1) + blank);
-		setting->postblend_v_end = cur_frame_par->VPP_vsc_endp;
+		{
+			u32 window_h = 0;
+
+			if (cur_frame_par->VPP_vsc_endp >=
+			    cur_frame_par->VPP_vsc_startp)
+				window_h = cur_frame_par->VPP_vsc_endp -
+					cur_frame_par->VPP_vsc_startp + 1;
+
+			if (framepacking_support &&
+			    !is_enable_3d_to_2d() &&
+			    glayer_info[0].layer_top == 0 &&
+			    blank == 45 && window_h == 2160) {
+				/* FULL3D_FP: 1080 + 45 + 1080 raster. */
+				u32 eye_h = window_h >> 1;
+
+				setting->postblend_v_start = eye_h + blank;
+				setting->postblend_v_end =
+					(eye_h << 1) + blank - 1;
+			} else {
+				setting->postblend_v_start =
+					cur_frame_par->VPP_vsc_startp +
+					(((cur_frame_par->VPP_vsc_endp -
+					   cur_frame_par->VPP_vsc_startp +
+					   1 - blank) >> 1) + blank);
+				setting->postblend_v_end =
+					cur_frame_par->VPP_vsc_endp;
+			}
+		}
 
 		{
 		        s32 shift = glayer_info[0].layer_top;
@@ -5743,6 +5854,124 @@ s32 config_3d_vd2_blend(struct video_layer_s *layer,
 			cur_frame_par->VPP_hd_start_lines_;
 		setting->postblend_h_end =
 			cur_frame_par->VPP_hd_end_lines_;
+	}
+
+
+
+	/*
+	 * Shared-VPP synthetic Full-SBS: VD2 enters preblend before VD1 PPS.
+	 * Use the same input-coordinate window as VD1, rather than
+	 * VD1's already-scaled output/pillarbox coordinates.
+	 *
+	 * Only change geometry where the source-width preblend
+	 * rectangle is valid and exceeds the final output width.
+	 */
+	if (full3d_auto_fp &&
+	    full3d_vd2_preblend_supported() &&
+	    framepacking_support &&
+	    (process_3d_type & (MODE_3D_ENABLE | MODE_3D_FP)) ==
+	    (MODE_3D_ENABLE | MODE_3D_FP) &&
+	    !is_enable_3d_to_2d() &&
+	    dispbuf &&
+	    !(dispbuf->type & (VIDTYPE_MVC | VIDTYPE_COMPRESS)) &&
+	    cur_frame_par->vpp_3d_mode == VPP_3D_MODE_LR &&
+	    cur_frame_par->video_input_w > 0 &&
+	    cur_frame_par->VPP_hd_end_lines_ >=
+	    cur_frame_par->VPP_hd_start_lines_ &&
+	    cur_frame_par->VPP_hd_end_lines_ -
+	    cur_frame_par->VPP_hd_start_lines_ + 1 ==
+	    cur_frame_par->video_input_w &&
+	    cur_frame_par->VPP_hsc_endp >=
+	    cur_frame_par->VPP_hsc_startp &&
+	    cur_frame_par->VPP_hsc_endp -
+	    cur_frame_par->VPP_hsc_startp + 1 <
+	    cur_frame_par->video_input_w &&
+	    setting->postblend_h_start ==
+	    cur_frame_par->VPP_hsc_startp &&
+	    setting->postblend_h_end ==
+	    cur_frame_par->VPP_hsc_endp) {
+		setting->postblend_h_start =
+			cur_frame_par->VPP_hd_start_lines_;
+		setting->postblend_h_end =
+			cur_frame_par->VPP_hd_end_lines_;
+	}
+	/* S7D-only VD2 input-space horizontal preblend correction.
+	 * Covers SBS and TAB, including horizontal upscaling.
+	 */
+	if (full3d_shared_safa_fp_soc() &&
+	    full3d_auto_fp &&
+	    full3d_vd2_preblend_supported() && framepacking_support &&
+	    framepacking_blank == 45 &&
+	    cur_frame_par->VPP_vsc_startp == 0 &&
+	    cur_frame_par->VPP_vsc_endp == 2204 &&
+	    cur_frame_par->video_input_h == 2160 &&
+	    cur_frame_par->supsc0_vert_ratio == 0 &&
+	    !cur_frame_par->vpp_filter.vpp_pre_vsc_en &&
+	    (process_3d_type & (MODE_3D_ENABLE | MODE_3D_FP)) ==
+		(MODE_3D_ENABLE | MODE_3D_FP) &&
+	    !(process_3d_type & MODE_3D_MVC) &&
+	    !is_enable_3d_to_2d() && dispbuf &&
+	    !(dispbuf->type & (VIDTYPE_MVC | VIDTYPE_COMPRESS)) &&
+	    (((process_3d_type & (MODE_FORCE_3D_LR | MODE_FORCE_3D_TB)) ==
+		MODE_FORCE_3D_LR &&
+		cur_frame_par->vpp_3d_mode == VPP_3D_MODE_LR) ||
+	     ((process_3d_type & (MODE_FORCE_3D_LR | MODE_FORCE_3D_TB)) ==
+		MODE_FORCE_3D_TB &&
+		cur_frame_par->vpp_3d_mode == VPP_3D_MODE_TB)) &&
+	    cur_frame_par->video_input_w > 0 &&
+	    cur_frame_par->VPP_hd_end_lines_ >=
+		cur_frame_par->VPP_hd_start_lines_ &&
+	    cur_frame_par->VPP_hd_end_lines_ -
+		cur_frame_par->VPP_hd_start_lines_ + 1 ==
+		cur_frame_par->video_input_w &&
+	    cur_frame_par->VPP_hsc_endp >= cur_frame_par->VPP_hsc_startp &&
+	    cur_frame_par->VPP_hsc_endp - cur_frame_par->VPP_hsc_startp + 1 !=
+		cur_frame_par->video_input_w &&
+	    setting->postblend_h_start == cur_frame_par->VPP_hsc_startp &&
+	    setting->postblend_h_end == cur_frame_par->VPP_hsc_endp) {
+		setting->postblend_h_start =
+			cur_frame_par->VPP_hd_start_lines_;
+		setting->postblend_h_end =
+			cur_frame_par->VPP_hd_end_lines_;
+	}
+	if (video_is_meson_s7d_cpu() && full3d_auto_fp &&
+	    framepacking_support && dispbuf &&
+	    !(dispbuf->type & (VIDTYPE_MVC | VIDTYPE_COMPRESS)) &&
+	    (process_3d_type & (MODE_3D_ENABLE | MODE_3D_FP)) ==
+		(MODE_3D_ENABLE | MODE_3D_FP) &&
+	    ((process_3d_type & (MODE_FORCE_3D_LR | MODE_FORCE_3D_TB)) ==
+		MODE_FORCE_3D_LR ||
+	     (process_3d_type & (MODE_FORCE_3D_LR | MODE_FORCE_3D_TB)) ==
+		MODE_FORCE_3D_TB)) {
+		static int last_kind = -1;
+		static u32 last_hs = ~0U, last_he = ~0U;
+		static u32 last_vs = ~0U, last_ve = ~0U;
+		int kind = (process_3d_type & MODE_FORCE_3D_TB) ? 2 : 1;
+		if (last_kind != kind ||
+		    setting->postblend_h_start != last_hs ||
+		    setting->postblend_h_end != last_he ||
+		    setting->postblend_v_start != last_vs ||
+		    setting->postblend_v_end != last_ve) {
+			last_kind = kind;
+			last_hs = setting->postblend_h_start;
+			last_he = setting->postblend_h_end;
+			last_vs = setting->postblend_v_start;
+			last_ve = setting->postblend_v_end;
+			pr_info("FULL3D_SAFA VD2 kind=%s "
+				"source_w=%u output_x=%u..%u "
+				"queued_x=%u..%u queued_y=%u..%u "
+				"window_y=%u..%u\n",
+				kind == 2 ? "TAB" : "SBS",
+				cur_frame_par->video_input_w,
+				cur_frame_par->VPP_hsc_startp,
+				cur_frame_par->VPP_hsc_endp,
+				setting->postblend_h_start,
+				setting->postblend_h_end,
+				setting->postblend_v_start,
+				setting->postblend_v_end,
+				cur_frame_par->VPP_vsc_startp,
+				cur_frame_par->VPP_vsc_endp);
+		}
 	}
 
 	return 0;
@@ -6022,7 +6251,7 @@ s32 config_vd_position_internal(struct video_layer_s *layer,
 	setting->src_h =
 		(dispbuf->type & VIDTYPE_COMPRESS) ?
 		dispbuf->compHeight : dispbuf->height;
-	/* FULL3D_FP_V030RC1: the 45-line FP blank is output timing, not part of an SBS/TB decode buffer. */
+	/* FULL3D_FP: the 45-line FP blank is output timing, not part of an SBS/TB decode buffer. */
 	if ((process_3d_type & MODE_3D_FP) &&
 	    !(dispbuf->type & VIDTYPE_MVC))
 		blank = 0;
@@ -6149,6 +6378,50 @@ s32 config_vd_position_internal(struct video_layer_s *layer,
 #endif
 	setting->vpp_3d_mode =
 		layer->cur_frame_par->vpp_3d_mode;
+
+	/* Full3D: passive source-coordinate logging. */
+	if (video_is_meson_s7d_cpu() && framepacking_support &&
+	    ((process_3d_type & (MODE_3D_FP | MODE_3D_MVC)) ||
+	     (dispbuf->type & VIDTYPE_MVC))) {
+		/* Keep independent logging state for VD1 and VD2. */
+		static u32 last_type[2], last_src_h[2];
+		static u32 last_ls[2], last_le[2];
+		static u32 last_rs[2], last_re[2];
+		static bool last_valid[2];
+		u8 n = layer->layer_id;
+		u32 this_type = dispbuf->type;
+
+		if (n < 2 &&
+		    (!last_valid[n] ||
+		     this_type != last_type[n] ||
+		     setting->src_h != last_src_h[n] ||
+		     setting->l_vs_luma != last_ls[n] ||
+		     setting->l_ve_luma != last_le[n] ||
+		     setting->r_vs_luma != last_rs[n] ||
+		     setting->r_ve_luma != last_re[n])) {
+			last_valid[n] = true;
+			last_type[n] = this_type;
+			last_src_h[n] = setting->src_h;
+			last_ls[n] = setting->l_vs_luma;
+			last_le[n] = setting->l_ve_luma;
+			last_rs[n] = setting->r_vs_luma;
+			last_re[n] = setting->r_ve_luma;
+
+			pr_info("FULL3D_FP MIF layer=%u mvc=%u "
+				"vf=%ux%u src_h=%u L_y=%u..%u "
+				"R_y=%u..%u blank=%u\n",
+				layer->layer_id,
+				!!(this_type & VIDTYPE_MVC),
+				dispbuf->width, dispbuf->height,
+				setting->src_h,
+				setting->l_vs_luma,
+				setting->l_ve_luma,
+				setting->r_vs_luma,
+				setting->r_ve_luma,
+				framepacking_blank);
+		}
+	}
+
 	return 0;
 }
 
@@ -6172,7 +6445,7 @@ static void config_vd_param_internal(struct video_layer_s *layer,
 	} else if ((process_3d_type & MODE_3D_FP) &&
 		   !(dispbuf->type & VIDTYPE_MVC) &&
 		   !is_enable_3d_to_2d()) {
-		/* FULL3D_FP_V030RC1: split the virtual 2160-line VPP canvas evenly: 1080 + 1080. */
+		/* FULL3D_FP: split the virtual 2160-line VPP canvas evenly: 1080 + 1080. */
 		zoom_start_y /= 2;
 		zoom_end_y = ((zoom_end_y + 1) >> 1) - 1;
 	} else if ((dispbuf->type & VIDTYPE_MVC) &&
@@ -6190,6 +6463,7 @@ static void config_vd_param_internal(struct video_layer_s *layer,
 	layer->end_x_lines = frame_par->VPP_hd_end_lines_;
 	layer->start_y_lines = zoom_start_y;
 	layer->end_y_lines = zoom_end_y;
+
 }
 
 void config_vd_param(struct video_layer_s *layer,
@@ -6278,6 +6552,67 @@ s32 config_vd_pps_internal(struct video_layer_s *layer,
 
 	if (setting->vsr_safa_support) {
 		bool postsc_en;
+		s32 fp_safa_original_dst_h = dst_h;
+		/* Full3D: preserve Kodi/VPP geometry selection.
+		 * Only correct full 2205-line S7D synthetic FP output.
+		 */
+		bool fp_safa_sbs =
+			(process_3d_type & (MODE_FORCE_3D_LR | MODE_FORCE_3D_TB)) ==
+				MODE_FORCE_3D_LR &&
+			cur_frame_par->vpp_3d_mode == VPP_3D_MODE_LR;
+		bool fp_safa_tab =
+			(process_3d_type & (MODE_FORCE_3D_LR | MODE_FORCE_3D_TB)) ==
+				MODE_FORCE_3D_TB &&
+			cur_frame_par->vpp_3d_mode == VPP_3D_MODE_TB;
+		bool fp_safa_candidate = cur_dev &&
+			full3d_shared_safa_fp_soc() && layer->layer_id == 0 &&
+			layer->dispbuf &&
+			!(layer->dispbuf->type & (VIDTYPE_MVC | VIDTYPE_COMPRESS)) &&
+			full3d_auto_fp && framepacking_support &&
+			framepacking_blank == 45 &&
+			(process_3d_type & (MODE_3D_ENABLE | MODE_3D_FP)) ==
+				(MODE_3D_ENABLE | MODE_3D_FP) &&
+			!(process_3d_type & MODE_3D_MVC) &&
+			!is_enable_3d_to_2d() &&
+			(fp_safa_sbs || fp_safa_tab);
+		s32 fp_safa_original_src_h = src_h;
+		s32 fp_safa_picture_h = dst_h > framepacking_blank ?
+			dst_h - framepacking_blank : 0;
+		bool fp_safa_full_window =
+			cur_frame_par->VPP_vsc_startp == 0 &&
+			cur_frame_par->VPP_vsc_endp == 2204 &&
+			dst_h == 2205;
+		bool fp_safa_eligible = fp_safa_candidate &&
+			fp_safa_full_window && src_w > 0 && dst_w > 0 &&
+			src_h > 0 && !(src_h & 1) &&
+			fp_safa_picture_h > 0 && !(fp_safa_picture_h & 1);
+		bool fp_safa_need_hsc = src_w != dst_w ||
+			vpp_filter->vpp_hsc_start_phase_step != 0x1000000 ||
+			vpp_filter->vpp_pre_hsc_en;
+		bool fp_safa_need_vsc = src_h != fp_safa_picture_h ||
+			vpp_filter->vpp_pre_vsc_en ||
+			cur_frame_par->supsc0_vert_ratio != 0;
+		/* Regime 1: no resizing, verified SBS geometry.
+		 * Regime 2: horizontal scaling, experimental 2205/2205.
+		 * Regime 3: vertical scaling or letterbox, diagnostic only.
+		 * Regime 0: other frame, unchanged.
+		 */
+		int fp_safa_regime = fp_safa_eligible ?
+			(fp_safa_need_vsc ? 3 : (fp_safa_need_hsc ? 2 : 1)) :
+			(fp_safa_candidate ? 3 : 0);
+		bool fp_mvc_diagnostic = cur_dev &&
+			video_is_meson_s7d_cpu() &&
+			layer->layer_id == 0 &&
+			((layer->dispbuf &&
+			  (layer->dispbuf->type & VIDTYPE_MVC)) ||
+			 (process_3d_type & MODE_3D_MVC));
+
+		if (fp_safa_regime == 1)
+			dst_h = src_h;
+		else if (fp_safa_regime == 2) {
+			src_h = fp_safa_original_dst_h;
+			dst_h = fp_safa_original_dst_h;
+		}
 
 		if (vpp_filter->vpp_hsc_start_phase_step == 0x1000000 &&
 			vpp_filter->vpp_vsc_start_phase_step == 0x1000000 &&
@@ -6289,6 +6624,52 @@ s32 config_vd_pps_internal(struct video_layer_s *layer,
 
 		postsc_en = !(vpp_filter->vpp_hsc_start_phase_step == 0x1000000 &&
 			vpp_filter->vpp_vsc_start_phase_step == 0x1000000);
+		if (fp_safa_regime == 1)
+			postsc_en = false;
+		else if (fp_safa_regime == 2)
+			postsc_en = true;
+
+		/* Requested VSR geometry, not hardware register readback. */
+		if (fp_safa_candidate || fp_mvc_diagnostic) {
+			static int prev_kind = -1;
+			static int prev_regime = -1, prev_postsc = -1;
+			static s32 prev_src_w, prev_src_h, prev_dst_w, prev_dst_h;
+			static u32 prev_vstart = ~0U;
+			int kind = fp_safa_candidate ? (fp_safa_tab ? 2 : 1) : 3;
+			if (kind != prev_kind ||
+			    fp_safa_regime != prev_regime ||
+			    (int)postsc_en != prev_postsc ||
+			    src_w != prev_src_w || src_h != prev_src_h ||
+			    dst_w != prev_dst_w || dst_h != prev_dst_h ||
+			    cur_frame_par->VPP_vsc_startp != prev_vstart) {
+				prev_kind = kind;
+				prev_regime = fp_safa_regime;
+				prev_postsc = (int)postsc_en;
+				prev_src_w = src_w;
+				prev_src_h = src_h;
+				prev_dst_w = dst_w;
+				prev_dst_h = dst_h;
+				prev_vstart = cur_frame_par->VPP_vsc_startp;
+				pr_info("FULL3D_SAFA CONFIG kind=%s "
+					"regime=%d eligible=%u hsc=%u vsc=%u "
+					"input=%dx%d requested_src=%dx%d "
+					"original_dst=%dx%d target_dst=%dx%d "
+					"postsc=%u picture_h=%d "
+					"vstart=%u vend=%u hphase=0x%x vphase=0x%x "
+					"process=0x%x vpp3d=%u\n",
+					kind == 3 ? "MVC" : (kind == 2 ? "TAB" : "SBS"),
+					fp_safa_regime, fp_safa_eligible ? 1 : 0,
+					fp_safa_need_hsc ? 1 : 0, fp_safa_need_vsc ? 1 : 0,
+					src_w, fp_safa_original_src_h, src_w, src_h,
+					dst_w, fp_safa_original_dst_h, dst_w, dst_h,
+					postsc_en ? 1 : 0, fp_safa_picture_h,
+					cur_frame_par->VPP_vsc_startp,
+					cur_frame_par->VPP_vsc_endp,
+					vpp_filter->vpp_hsc_start_phase_step,
+					vpp_filter->vpp_vsc_start_phase_step,
+					process_3d_type, cur_frame_par->vpp_3d_mode);
+			}
+		}
 		setting->vsr.layer_id = layer->layer_id;
 		setting->vsr.vpp_index = layer->vpp_index;
 		setting->vsr.vsr_top.hsize_in = src_w;
@@ -6351,6 +6732,14 @@ s32 config_vd_pps_internal(struct video_layer_s *layer,
 			setting->vsr.vsr_pi.vsize_in = src_h;
 			setting->vsr.vsr_pi.hsize_out = dst_w;
 			setting->vsr.vsr_pi.vsize_out = dst_h;
+			if (fp_safa_regime == 2) {
+				static s32 pi_last_h = -1;
+				if (pi_last_h != src_h) {
+					pi_last_h = src_h;
+					pr_info("FULL3D_SAFA PI src=%dx%d dst=%dx%d\n",
+						src_w, src_h, dst_w, dst_h);
+				}
+			}
 		}
 	} else {
 		if (vpp_filter->vpp_hsc_start_phase_step == 0x1000000 &&
@@ -6367,6 +6756,7 @@ s32 config_vd_pps_internal(struct video_layer_s *layer,
 	}
 	setting->vinfo_width = info->width;
 	setting->vinfo_height = info->height;
+
 
 	return 0;
 }
@@ -6518,6 +6908,31 @@ s32 config_vd_blend(struct video_layer_s *layer,
 	}
 
 	/*
+	 * FULL3D_FP: anchor the upper eye to the start of the
+	 * 2205-line frame-packed raster for 1080p synthetic FP.
+	 * Do not modify MVC or shifted playback.
+	 */
+	if ((process_3d_type & MODE_3D_FP) &&
+	    framepacking_support &&
+	    !is_enable_3d_to_2d() &&
+	    dispbuf && !(dispbuf->type & VIDTYPE_MVC) &&
+	    layer->layer_id == 0 &&
+	    glayer_info[0].layer_top == 0 &&
+	    framepacking_blank == 45 &&
+	    cur_frame_par->VPP_vsc_endp >=
+	    cur_frame_par->VPP_vsc_startp) {
+		u32 window_h =
+			cur_frame_par->VPP_vsc_endp -
+			cur_frame_par->VPP_vsc_startp + 1;
+
+		if (window_h == 2160) {
+			setting->postblend_v_start = 0;
+			setting->postblend_v_end =
+				(window_h >> 1) - 1;
+		}
+	}
+
+	/*
 	 * MVC frame-packed upper-eye placement.
 	 * Keep the 2205-line output container fixed and clip/place
 	 * VD1 by exactly the same shift used for VD2.
@@ -6582,13 +6997,95 @@ s32 config_vd_blend(struct video_layer_s *layer,
 
 	if (!legacy_vpp) {
 		u32 temp_h = cur_frame_par->video_input_h;
-		if ((process_3d_type & MODE_3D_FP) && framepacking_support &&
+		bool is_linear_mif = cur_dev->mif_linear ||
+				     (cur_dev->display_module == T7_DISPLAY_MODULE);
+
+		/* Full3D: full-window SBS/TAB synthetic FP preblend.
+		 * Preserve baseline behavior for vertical scaling.
+		 */
+		bool fp_safa_sbs =
+			(process_3d_type & (MODE_FORCE_3D_LR | MODE_FORCE_3D_TB)) ==
+				MODE_FORCE_3D_LR &&
+			cur_frame_par->vpp_3d_mode == VPP_3D_MODE_LR;
+		bool fp_safa_tab =
+			(process_3d_type & (MODE_FORCE_3D_LR | MODE_FORCE_3D_TB)) ==
+				MODE_FORCE_3D_TB &&
+			cur_frame_par->vpp_3d_mode == VPP_3D_MODE_TB;
+		bool fp_safa_candidate = full3d_shared_safa_fp_soc() &&
+			layer->layer_id == 0 &&
+			glayer_info[0].vsr_safa_support &&
+			full3d_auto_fp && framepacking_support &&
+			framepacking_blank == 45 &&
+			(process_3d_type & (MODE_3D_ENABLE | MODE_3D_FP)) ==
+				(MODE_3D_ENABLE | MODE_3D_FP) &&
+			!(process_3d_type & MODE_3D_MVC) &&
+			!is_enable_3d_to_2d() && dispbuf &&
+			!(dispbuf->type & (VIDTYPE_MVC | VIDTYPE_COMPRESS)) &&
+			(fp_safa_sbs || fp_safa_tab);
+		u32 fp_safa_out_w = cur_frame_par->VPP_hsc_endp -
+			cur_frame_par->VPP_hsc_startp + 1;
+		u32 fp_safa_out_h = cur_frame_par->VPP_vsc_endp >=
+			cur_frame_par->VPP_vsc_startp ?
+			cur_frame_par->VPP_vsc_endp -
+			cur_frame_par->VPP_vsc_startp + 1 : 0;
+		u32 fp_safa_in_h = cur_frame_par->video_input_h;
+		u32 fp_safa_picture_h = fp_safa_out_h > framepacking_blank ?
+			fp_safa_out_h - framepacking_blank : 0;
+		bool fp_safa_full_window =
+			cur_frame_par->VPP_vsc_startp == 0 &&
+			cur_frame_par->VPP_vsc_endp == 2204 &&
+			fp_safa_out_h == 2205;
+		bool fp_safa_eligible = fp_safa_candidate &&
+			fp_safa_full_window && fp_safa_out_w > 0 &&
+			cur_frame_par->video_input_w > 0 &&
+			fp_safa_in_h > 0 && !(fp_safa_in_h & 1) &&
+			fp_safa_picture_h > 0 && !(fp_safa_picture_h & 1) &&
+			fp_safa_in_h == fp_safa_picture_h &&
+			cur_frame_par->supsc0_vert_ratio == 0 &&
+			!cur_frame_par->vpp_filter.vpp_pre_vsc_en;
+		bool fp_safa_preblend = fp_safa_eligible;
+		/* Non-linear-MIF pipelines retain the calculated FP preblend span.
+		 * Linear-MIF and T7 retain the original video_input_h. */
+		if ((!is_linear_mif || fp_safa_preblend) &&
+		    (process_3d_type & MODE_3D_FP) && framepacking_support &&
 		    dispbuf && !(dispbuf->type & VIDTYPE_MVC)) {
-			/* FULL3D_FP_V030RC1: preblend must span the full 2205-line FP canvas. */
+			/* FULL3D_FP: preblend must span the full 2205-line FP canvas. */
 			temp_h = cur_frame_par->VPP_vsc_endp -
 				cur_frame_par->VPP_vsc_startp + 1;
 		}
 
+
+		/* Requested preblend dimensions, not register readback. */
+		if (fp_safa_candidate) {
+			static int last_kind = -1;
+			static int last_eligible = -1;
+			static u32 last_pre_h = ~0U, last_vstart = ~0U;
+			int kind = fp_safa_tab ? 2 : 1;
+			if (kind != last_kind ||
+			    (int)fp_safa_eligible != last_eligible ||
+			    temp_h != last_pre_h ||
+			    cur_frame_par->VPP_vsc_startp != last_vstart) {
+				last_kind = kind;
+				last_eligible = fp_safa_eligible;
+				last_pre_h = temp_h;
+				last_vstart = cur_frame_par->VPP_vsc_startp;
+				pr_info("FULL3D_SAFA PREBLEND kind=%s "
+					"eligible=%u extended=%u linear_mif=%u "
+					"vf=%ux%u input=%ux%u output=%ux%u "
+					"queued_preblend_h=%u picture_h=%u "
+					"vstart=%u vend=%u process=0x%x\n",
+					fp_safa_tab ? "TAB" : "SBS",
+					fp_safa_eligible ? 1 : 0,
+					fp_safa_preblend ? 1 : 0,
+					is_linear_mif ? 1 : 0,
+					dispbuf->width, dispbuf->height,
+					cur_frame_par->video_input_w, fp_safa_in_h,
+					fp_safa_out_w, fp_safa_out_h, temp_h,
+					fp_safa_picture_h, cur_frame_par->VPP_vsc_startp,
+					cur_frame_par->VPP_vsc_endp,
+					process_3d_type);
+			}
+		}
 		temp_h <<= 16;
 		setting->preblend_h_size |= temp_h;
 
@@ -6644,6 +7141,7 @@ s32 config_vd_blend(struct video_layer_s *layer,
 		}
 	}
 #endif
+
 	return 0;
 }
 
@@ -6657,6 +7155,43 @@ void vd_blend_setting(struct video_layer_s *layer, struct blend_setting_s *setti
 
 	if (!setting)
 		return;
+
+	/* Full3D: passive S7D blend geometry. */
+	if (video_is_meson_s7d_cpu() && framepacking_support &&
+	    ((process_3d_type & (MODE_3D_FP | MODE_3D_MVC)) ||
+	     (layer->dispbuf &&
+	      (layer->dispbuf->type & VIDTYPE_MVC))) &&
+	    layer->layer_id < 2) {
+		static u32 prev_start[2], prev_end[2], prev_pre_end[2];
+		static bool prev_valid[2], prev_mvc[2];
+		u8 n = layer->layer_id;
+		bool is_mvc = layer->dispbuf &&
+			(layer->dispbuf->type & VIDTYPE_MVC);
+
+		if (!prev_valid[n] || prev_mvc[n] != is_mvc ||
+		    prev_start[n] != setting->postblend_v_start ||
+		    prev_end[n] != setting->postblend_v_end ||
+		    prev_pre_end[n] != setting->preblend_v_end) {
+			prev_valid[n] = true;
+			prev_mvc[n] = is_mvc;
+			prev_start[n] = setting->postblend_v_start;
+			prev_end[n] = setting->postblend_v_end;
+			prev_pre_end[n] = setting->preblend_v_end;
+
+			pr_info("FULL3D_FP BLEND vd=%u mvc=%u "
+				"preY=%u..%u postY=%u..%u "
+				"postX=%u..%u process=0x%x\n",
+				n, is_mvc ? 1 : 0,
+				setting->preblend_v_start,
+				setting->preblend_v_end,
+				setting->postblend_v_start,
+				setting->postblend_v_end,
+				setting->postblend_h_start,
+				setting->postblend_h_end,
+				process_3d_type);
+		}
+	}
+
 	if (cur_dev->display_module == S5_DISPLAY_MODULE) {
 		vd_blend_setting_s5(layer, setting);
 		return;
@@ -7609,8 +8144,13 @@ void vpp_blend_update_t7(const struct vinfo_s *vinfo)
 	int i;
 	u8 vpp_index = VPP0;
 
-	if (vd_layer[0].enable_3d_mode == mode_3d_mvc_enable)
+	if (vd_layer[0].enable_3d_mode == mode_3d_mvc_enable ||
+	    ((process_3d_type & MODE_3D_FP) &&
+	     vd_layer[0].dispbuf &&
+	     !(vd_layer[0].dispbuf->type & VIDTYPE_MVC))) {
+		/* FULL3D_FP: enable synthetic 3D companion eye on T7 */
 		mode |= COMPOSE_MODE_3D;
+	}
 	else if (is_amdv_on() && last_el_status)
 		mode |= COMPOSE_MODE_DV;
 	if (bypass_cm)
@@ -8578,7 +9118,7 @@ void vpp_blend_update(const struct vinfo_s *vinfo, u8 vpp_index)
 	    ((process_3d_type & MODE_3D_FP) &&
 	     vd_layer[0].dispbuf &&
 	     !(vd_layer[0].dispbuf->type & VIDTYPE_MVC))) {
-		/* FULL3D_FP_V030RC1: only synthetic FP borrows MVC's companion-eye compose state. */
+		/* FULL3D_FP: only synthetic FP borrows MVC's companion-eye compose state. */
 		mode |= COMPOSE_MODE_3D;
 	}
 	else if (is_amdv_on() && last_el_status)
@@ -9963,6 +10503,44 @@ static void canvas_update_for_mif(struct video_layer_s *layer,
 	}
 }
 
+/*
+ * FULL3D_LINEAR: Linear MIF needs physical addresses/strides in
+ * addition to the synthetic canvas-number write. Mirror VD1's decoded
+ * canvas0 surface into VD2's bank 0; VD2's crop selects the right eye.
+ *
+ * Only invoke this for a valid, uncompressed, synthetic frame. The
+ * VD2 linear-MIF register mapping must be initialized.
+ */
+static void full3d_set_vd2_linear(struct video_layer_s *layer,
+                                        struct vframe_s *vf)
+{
+	if (vf->canvas0Addr != (u32)-1) {
+		struct canvas_s y, cb, cr;
+		u32 *tbl = &layer->canvas_tbl[layer->cur_canvas_id][0];
+
+		/* Use the same canvas0 descriptors already copied for VD1. */
+		canvas_read(tbl[0], &y);
+		canvas_read(tbl[1], &cb);
+		canvas_read(tbl[2], &cr);
+		set_vd_mif_linear_cs(&vd_layer[1], &y, &cb, &cr, vf, 0);
+		if (vd_layer[1].mif_setting.block_mode != y.blkmode) {
+			vd_layer[1].mif_setting.block_mode = y.blkmode;
+			vd_set_blk_mode(&vd_layer[1], y.blkmode);
+		}
+	} else {
+		set_vd_mif_linear(&vd_layer[1], &vf->canvas0_config[0],
+		                  vf->plane_num, vf, 0);
+		if (vd_layer[1].mif_setting.block_mode !=
+		    vf->canvas0_config[0].block_mode) {
+			vd_layer[1].mif_setting.block_mode =
+				vf->canvas0_config[0].block_mode;
+			vd_set_blk_mode(&vd_layer[1],
+				vf->canvas0_config[0].block_mode);
+		}
+	}
+
+}
+
 static void canvas_update_for_3d(struct video_layer_s *layer,
 			     struct vframe_s *vf,
 			     struct vpp_frame_par_s *cur_frame_par,
@@ -10507,6 +11085,35 @@ int set_layer_display_canvas(struct video_layer_s *layer,
 					    cur_frame_par, disp_info,
 					    is_mvc);
 
+		/*
+		 * FULL3D_LINEAR: synthetic VD2 already receives the canvas0
+		 * index below, but linear-MIF hardware also requires addresses
+		 * and strides for that same decoded surface.
+		 *
+		 * Do not affect MVC, SC2, compressed AFBC frames, or other sizes.
+		 * A 3D playback restart is required after changing the parameter.
+		 */
+		if (synthetic_fp && (cur_dev->mif_linear || cur_dev->display_module == T7_DISPLAY_MODULE) && framepacking_support && !is_enable_3d_to_2d()) {
+			if (full3d_vd2_linear && cur_frame_par &&
+			    !(vf->type & VIDTYPE_COMPRESS) &&
+			    vf->canvas0Addr != 0 &&
+			    (vf->canvas0Addr != (u32)-1 ||
+			     (vf->plane_num >= 1 && vf->plane_num <= 3))) {
+				full3d_set_vd2_linear(layer, vf);
+				pr_info_once("FULL3D_LINEAR VD2 linear ACTIVE: "
+				             "size=%ux%u type=0x%x planes=%u canvas0=0x%x\n",
+				             vf->width, vf->height, vf->type,
+				             vf->plane_num, vf->canvas0Addr);
+			} else {
+				pr_info_once("FULL3D_LINEAR VD2 linear SKIPPED: "
+				             "switch=%d size=%ux%u type=0x%x "
+				             "planes=%u canvas0=0x%x\n",
+				             full3d_vd2_linear ? 1 : 0,
+				             vf->width, vf->height, vf->type,
+				             vf->plane_num, vf->canvas0Addr);
+			}
+		}
+
 		cur_dev->rdma_func[vpp_index].rdma_wr
 			(vd_mif_reg->vd_if0_canvas0,
 			layer->disp_canvas[cur_canvas_id][0]);
@@ -10516,7 +11123,7 @@ int set_layer_display_canvas(struct video_layer_s *layer,
 				(vd_mif_reg_mvc->vd_if0_canvas0,
 				layer->disp_canvas[cur_canvas_id][1]);
 		else if (synthetic_fp) {
-			/* FULL3D_FP_V030RC1: both synthetic eyes live in one packed surface. */
+			/* FULL3D_FP: both synthetic eyes live in one packed surface. */
 			cur_dev->rdma_func[vpp_index].rdma_wr
 				(vd_mif_reg_mvc->vd_if0_canvas0,
 				layer->disp_canvas[cur_canvas_id][0]);
@@ -10938,7 +11545,7 @@ static void is_framepacking_support(struct vframe_s *vf)
 
 	if ((process_3d_type & MODE_3D_FP) &&
 	    !(vf->type & VIDTYPE_MVC)) {
-		/* FULL3D_FP_V030RC1: synthetic SBS/TB frame packing must not depend on the
+		/* FULL3D_FP: synthetic SBS/TB frame packing must not depend on the
 		 * MVC module parameter, which CoreELEC resets to 0 on stop. */
 		framepacking_support = 1;
 	} else if (vf->type & VIDTYPE_MVC) {
@@ -15025,6 +15632,17 @@ int video_late_uninit(void)
 
 MODULE_PARM_DESC(vpp_hold_line, "\n vpp_hold_line\n");
 module_param_array(vpp_hold_line, uint, &param_vpp_num, 0664);
+
+MODULE_PARM_DESC(full3d_vd2_linear,
+	"Full3D: Synthetic uncompressed Full3D VD2 linear MIF support "
+	"(default on; change only between playback sessions)");
+module_param(full3d_vd2_linear, bool, 0644);
+
+MODULE_PARM_DESC(full3d_auto_fp,
+	"Automatic Amlogic synthetic Full3D crop/preblend correction "
+	"(default on; disable for troubleshooting)");
+module_param(full3d_auto_fp, bool, 0644);
+
 
 MODULE_PARM_DESC(bypass_cm, "\n bypass_cm\n");
 module_param(bypass_cm, bool, 0664);
