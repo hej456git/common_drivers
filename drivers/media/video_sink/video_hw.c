@@ -893,6 +893,7 @@ static bool full3d_vd2_linear = true;
 static bool full3d_auto_fp = true;
 
 
+
 /*
  * Conventional Amlogic VD2 preblend register path.
  * S5/C3 use separate display implementations and are excluded
@@ -3593,6 +3594,76 @@ SKIP_VD1_AFBC:
 	return;
 }
 
+
+/*
+ * Correct the eye span in compatible synthetic SBS frame packing.
+ * Select using processing-path geometry, not SoC or resolution.
+ *
+ * MVC, 2D, TAB, linear MIF, T7, C3 and SaFa use other paths.
+ */
+static u32 full3d_fp_effective_eye_span(
+    const struct vpp_frame_par_s *fp,
+    const struct vframe_s *vf)
+{
+    u32 window_h;
+    u32 slot_h;
+    u32 out_w;
+    u32 divisor;
+    u32 eye_h;
+
+    if (!full3d_auto_fp || !cur_dev || !fp || !vf ||
+        !framepacking_support || !framepacking_blank ||
+        cur_dev->mif_linear ||
+        cur_dev->display_module == T7_DISPLAY_MODULE ||
+        cur_dev->display_module == C3_DISPLAY_MODULE ||
+        glayer_info[0].vsr_safa_support ||
+        glayer_info[0].layer_top <= 0 ||
+        is_enable_3d_to_2d() ||
+        (vf->type & (VIDTYPE_MVC | VIDTYPE_COMPRESS |
+                     VIDTYPE_INTERLACE)) ||
+        (process_3d_type & (MODE_3D_ENABLE | MODE_3D_FP)) !=
+            (MODE_3D_ENABLE | MODE_3D_FP) ||
+        (process_3d_type &
+            (MODE_3D_MVC | MODE_3D_OUT_TB | MODE_3D_OUT_LR)) ||
+        fp->vpp_3d_mode != VPP_3D_MODE_LR ||
+        /* Exclude actual vertical prescaling and superscaling. */
+        fp->vpp_filter.vpp_pre_vsc_en ||
+        fp->supsc0_vert_ratio ||
+        fp->supsc1_vert_ratio ||
+        fp->VPP_vsc_endp < fp->VPP_vsc_startp ||
+        fp->VPP_hsc_endp < fp->VPP_hsc_startp ||
+        fp->vpp_filter.vpp_hsc_start_phase_step != 0x1000000)
+        return 0;
+
+    /* Calculate eye-slot height from the actual FP raster. */
+    window_h = fp->VPP_vsc_endp - fp->VPP_vsc_startp + 1;
+
+    if (window_h <= framepacking_blank ||
+        ((window_h - framepacking_blank) & 1))
+        return 0;
+
+    slot_h = (window_h - framepacking_blank) / 2;
+
+    /*
+     * Apply only to the matching 1:1 horizontal VPP path.
+     * Horizontally scaled paths require separate geometry handling.
+     */
+    out_w = fp->VPP_hsc_endp - fp->VPP_hsc_startp + 1;
+
+    if (!fp->video_input_w || fp->video_input_w != out_w)
+        return 0;
+
+    divisor = fp->vscale_skip_count + 1;
+
+    if (!divisor)
+        return 0;
+
+    eye_h = vf->height / divisor;
+
+    /* Clamp only when the effective eye is shorter than its slot. */
+    return eye_h > 0 && eye_h < slot_h ? eye_h : 0;
+}
+
 static void vd1_scaler_setting(struct video_layer_s *layer, struct scaler_setting_s *setting)
 {
 	u32 misc_off, i;
@@ -4347,6 +4418,7 @@ static void vd1_scaler_setting(struct video_layer_s *layer, struct scaler_settin
 			| (full3d_vpp_h & 0x1fff));
 		cur_dev->rdma_func[vpp_index].rdma_wr
 			(VPP_PIC_IN_HEIGHT + misc_off, full3d_vpp_h);
+
 	}
 
 	cur_dev->rdma_func[vpp_index].rdma_wr
@@ -5805,9 +5877,16 @@ s32 config_3d_vd2_blend(struct video_layer_s *layer,
 		        else if (shift < -max_shift)
 		                shift = -max_shift;
 
-		        if (shift > 0)
+		        if (shift > 0) {
+		                u32 eye_h = full3d_fp_effective_eye_span(cur_frame_par, dispbuf);
+		                u32 end;
 		                setting->postblend_v_start += shift;
-		        else if (shift < 0)
+		                if (eye_h) {
+		                        end = setting->postblend_v_start + eye_h - 1;
+		                        if (end < setting->postblend_v_end)
+		                                setting->postblend_v_end = end;
+		                }
+		        } else if (shift < 0)
 		                setting->postblend_v_end =
 		                        (s32)setting->postblend_v_end + shift;
 		}
@@ -6310,6 +6389,9 @@ s32 config_vd_position_internal(struct video_layer_s *layer,
 			&setting->r_vs_luma, &setting->r_ve_luma);
 	}
 #endif
+
+
+
 
 	/*
 	 * MVC frame-packed vertical shift:
@@ -6987,8 +7069,15 @@ s32 config_vd_blend(struct video_layer_s *layer,
 	         * the upper-eye preblend window.
 	         */
 	        if (shift > 0) {
+	                u32 eye_h = full3d_fp_effective_eye_span(cur_frame_par, dispbuf);
+	                u32 end;
 	                setting->preblend_v_start = eye_start + shift;
 	                setting->preblend_v_end = eye_end;
+	                if (eye_h) {
+	                        end = setting->preblend_v_start + eye_h - 1;
+	                        if (end < setting->preblend_v_end)
+	                                setting->preblend_v_end = end;
+	                }
 	        } else {
 	                setting->preblend_v_start = eye_start;
 	                setting->preblend_v_end = eye_end + shift;
@@ -7155,6 +7244,8 @@ void vd_blend_setting(struct video_layer_s *layer, struct blend_setting_s *setti
 
 	if (!setting)
 		return;
+
+
 
 	/* Full3D: passive S7D blend geometry. */
 	if (video_is_meson_s7d_cpu() && framepacking_support &&
@@ -15642,6 +15733,8 @@ MODULE_PARM_DESC(full3d_auto_fp,
 	"Automatic Amlogic synthetic Full3D crop/preblend correction "
 	"(default on; disable for troubleshooting)");
 module_param(full3d_auto_fp, bool, 0644);
+
+
 
 
 MODULE_PARM_DESC(bypass_cm, "\n bypass_cm\n");
